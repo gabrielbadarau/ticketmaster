@@ -26,6 +26,18 @@ Microservices (chosen deliberately for system-design learning value, even though
 
 **Data ownership**: one shared PostgreSQL database/schema across all services for now (matches the reference article, keeps focus on .NET + booking concurrency logic first). Database-per-service is a deliberate future refactor, not the starting point — don't split it unprompted.
 
+## Core entities & data model
+
+Exact field lists confirmed from the reference article's diagrams (not just its text) — use these as the starting point for EF Core entities:
+
+- **Event**: `id, venueId, performerId, tickets[], name, description, ...`
+- **Venue**: `id, location, seatMap, ...`
+- **Performer**: `id, ...`
+- **Ticket**: `id, eventId, seat, price, status (available|booked), userId`
+- **Booking**: `id, userId, tickets`
+
+Booking/reservation concurrency uses a Redis key `{ticketId: userId}` with a 10-minute TTL (the "Ticket Lock (Redis)" component) — this is the mechanism for Deep Dive 1 (preventing double-booking), not a DB-level lock or cron cleanup job.
+
 ## Build order
 
 1. **Event Service** — simplest read-only service, get .NET/EF Core basics working end-to-end
@@ -38,7 +50,7 @@ Local only, no cloud, to keep cost at zero. Postgres/Redis run via Docker Compos
 
 ## Environment status
 
-- .NET 10 SDK: not yet installed on this machine
-- Docker: not yet installed on this machine
+- .NET 10 SDK: installed via Homebrew (`dotnet --version` → 10.0.302)
+- Docker Desktop: app installed (`/Applications/Docker.app`), but CLI not yet on PATH (`docker --version` fails) — likely just needs Docker Desktop launched once to finish setup
 
-Check with `dotnet --version` and `docker --version` before assuming either is available.
+Re-check with `dotnet --version` and `docker --version` before assuming either is available; update this section when Docker's CLI comes online.
