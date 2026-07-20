@@ -40,9 +40,11 @@ Booking/reservation concurrency uses a Redis key `{ticketId: userId}` with a 10-
 
 ## Build order
 
-1. **Event Service** — simplest read-only service, get .NET/EF Core basics working end-to-end
+1. **Event Service** — simplest read-only service, get .NET/EF Core basics working end-to-end (in progress — solution + project scaffolded, Postgres reachable via docker-compose; EF Core models/DbContext not yet added)
 2. **Booking Service** — the interesting part: reservation flow, Redis TTL locks, preventing double-booking, Stripe
 3. **Search Service** — Postgres full-text → Elasticsearch, CDN/query caching
+
+Solution layout: `Ticketmaster.slnx` (root) with each service under `src/<ServiceName>` — e.g. `src/EventService`. Note: .NET 10's `dotnet new sln` now generates the newer XML-based `.slnx` format by default instead of the classic `.sln`.
 
 ## Deployment
 
