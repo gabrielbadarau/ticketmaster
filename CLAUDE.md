@@ -40,7 +40,7 @@ Booking/reservation concurrency uses a Redis key `{ticketId: userId}` with a 10-
 
 ## Build order
 
-1. **Event Service** — simplest read-only service, get .NET/EF Core basics working end-to-end (in progress — solution + project scaffolded, Postgres reachable via docker-compose; EF Core models/DbContext not yet added)
+1. **Event Service** — simplest read-only service, get .NET/EF Core basics working end-to-end (working: `GET /events/{id}` returns Event+Venue+Performer+Tickets from real Postgres data via EF Core, dev-seeded on startup. Returns raw entities with `ReferenceHandler.IgnoreCycles` for now — known rough edge, a real response DTO is the next refinement to avoid the `null` cycle-breaking artifacts in the JSON)
 2. **Booking Service** — the interesting part: reservation flow, Redis TTL locks, preventing double-booking, Stripe
 3. **Search Service** — Postgres full-text → Elasticsearch, CDN/query caching
 
