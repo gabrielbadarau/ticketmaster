@@ -1,5 +1,5 @@
 using EventService.Data;
-using EventService.Models;
+using EventService.Dtos;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -10,7 +10,7 @@ namespace EventService.Controllers;
 public class EventsController(EventDbContext db) : ControllerBase
 {
     [HttpGet("{id}")]
-    public async Task<ActionResult<Event>> GetById(Guid id)
+    public async Task<ActionResult<EventResponse>> GetById(Guid id)
     {
         var @event = await db.Events
             .AsNoTracking()
@@ -24,6 +24,13 @@ public class EventsController(EventDbContext db) : ControllerBase
             return NotFound();
         }
 
-        return @event;
+        return new EventResponse(
+            @event.Id,
+            @event.Name,
+            @event.Description,
+            @event.Date,
+            new VenueResponse(@event.Venue!.Id, @event.Venue.Name, @event.Venue.Address, @event.Venue.Capacity),
+            new PerformerResponse(@event.Performer!.Id, @event.Performer.Name, @event.Performer.Type),
+            @event.Tickets.Select(t => new TicketResponse(t.Id, t.Seat, t.Price, t.Status)).ToList());
     }
 }
