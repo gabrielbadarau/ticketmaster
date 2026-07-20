@@ -50,7 +50,7 @@ Local only, no cloud, to keep cost at zero. Postgres/Redis run via Docker Compos
 
 ## Environment status
 
-- .NET 10 SDK: installed via Homebrew (`dotnet --version` → 10.0.302)
-- Docker Desktop: app installed (`/Applications/Docker.app`), but CLI not yet on PATH (`docker --version` fails) — likely just needs Docker Desktop launched once to finish setup
+- .NET 10 SDK: working (`dotnet --version` → 10.0.302)
+- Docker: working (`docker --version` → 29.6.2, `docker compose version` → v5.3.1)
 
-Re-check with `dotnet --version` and `docker --version` before assuming either is available; update this section when Docker's CLI comes online.
+Both confirmed working as of 2026-07-20. Re-check if either command starts failing (e.g. after a machine restart with Docker Desktop not running).
