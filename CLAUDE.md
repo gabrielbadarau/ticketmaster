@@ -41,7 +41,7 @@ Booking/reservation concurrency will use a Redis key `{ticketId: userId}` with a
 
 ## Build order
 
-1. **Event Service** — done for the read path: `GET /events/{id}` returns `Event+Venue+Performer+Tickets` from real Postgres data via EF Core, dev-seeded on startup. Uses response DTOs (`Dtos/EventResponse.cs`) rather than returning entities directly — avoids leaking EF Core's circular navigation properties into the JSON. `GET /events/search` not yet built.
+1. **Event Service** — done: `GET /events/{id}` returns `Event+Venue+Performer+Tickets` from real Postgres data via EF Core, dev-seeded on startup. `GET /events/search` supports `keyword` (ILIKE against name/description), `start`/`end` date range, and `page`/`pageSize` pagination — projects straight to `EventSummaryResponse` in the SQL query itself rather than loading full entities first. Both use response DTOs (`Dtos/`) rather than returning entities directly — avoids leaking EF Core's circular navigation properties into the JSON.
 2. **Booking Service** — not started. The interesting part: reservation flow, Redis TTL locks, preventing double-booking, Stripe
 3. **Search Service** — not started. Postgres full-text → Elasticsearch, CDN/query caching
 
