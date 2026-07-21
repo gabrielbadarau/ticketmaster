@@ -35,14 +35,14 @@ As implemented in `src/EventService/Models/` (EF Core entity classes, migrated i
 - **Performer**: `Id, Name, Type`
 - **Ticket**: `Id, EventId, Seat, Price, Status (Available|Booked enum), UserId?`
 
-No `Booking` or `User` entities yet — those belong to the Booking Service's concern, deliberately not modeled by Event Service even though it's the same physical database.
+`Booking`/`BookingTicket` entities live in `src/BookingService/Models/` instead — see Booking Service structure below. Booking Service also keeps its own minimal `Ticket`/`TicketStatus` (duplicated from Event Service's, not shared — separate deployable services, deliberately no compile-time coupling between them).
 
-Booking/reservation concurrency will use a Redis key `{ticketId: userId}` with a 10-minute TTL (the "Ticket Lock (Redis)" component) once the Booking Service is built — this is the mechanism for Deep Dive 1 (preventing double-booking), not a DB-level lock or cron cleanup job.
+Booking/reservation concurrency uses a Redis key `ticket-lock:{ticketId}` → `userId`, with a 10-minute TTL (`SET key value NX EX 600`) — this is the actual mechanism for Deep Dive 1 (preventing double-booking), not a DB-level lock or cron cleanup job. `Ticket.Status` in Postgres only flips to `Booked` at confirm/payment time (not yet built) — the reserve step never touches it, reservation state lives entirely in Redis.
 
 ## Build order
 
 1. **Event Service** — done: `GET /events/{id}` returns `Event+Venue+Performer+Tickets` from real Postgres data via EF Core, dev-seeded on startup. `GET /events/search` supports `keyword` (ILIKE against name/description), `start`/`end` date range, and `page`/`pageSize` pagination — projects straight to `EventSummaryResponse` in the SQL query itself rather than loading full entities first. Both use response DTOs (`Dtos/`) rather than returning entities directly — avoids leaking EF Core's circular navigation properties into the JSON.
-2. **Booking Service** — not started. The interesting part: reservation flow, Redis TTL locks, preventing double-booking, Stripe
+2. **Booking Service** — in progress: `POST /bookings/reserve` implemented and verified (Redis TTL lock prevents double-booking, sequential-acquire-with-rollback for multi-ticket requests, DB checked as a second layer after locks succeed). Not yet built: confirm/payment step, Stripe integration, virtual waiting queue.
 3. **Search Service** — not started. Postgres full-text → Elasticsearch, CDN/query caching
 
 Solution layout: `Ticketmaster.slnx` (root) with each service under `src/<ServiceName>` — e.g. `src/EventService`. Note: .NET 10's `dotnet new sln` now generates the newer XML-based `.slnx` format by default instead of the classic `.sln`.
@@ -51,35 +51,49 @@ Solution layout: `Ticketmaster.slnx` (root) with each service under `src/<Servic
 
 ```
 src/EventService/
-  Controllers/EventsController.cs   GET /events/{id}
+  Controllers/EventsController.cs   GET /events/{id}, GET /events/search
   Models/                           EF Core entities (Event, Venue, Performer, Ticket, TicketStatus)
-  Dtos/EventResponse.cs             API response shape (EventResponse/VenueResponse/PerformerResponse/TicketResponse records)
+  Dtos/                             API response shapes (EventResponse, EventSummaryResponse + nested records)
   Data/EventDbContext.cs            DbContext, DbSets
-  Data/DbSeeder.cs                  Dev-only: seeds one test event if Events table is empty
-  Migrations/                       EF Core migrations (InitialCreate applied)
+  Data/DbSeeder.cs                  Dev-only: seeds 5 varied events if Events table is empty
+  Migrations/                       EF Core migrations (InitialCreate applied), history table __EFMigrationsHistory
 ```
 `Program.cs`: registers `EventDbContext` (Npgsql/Postgres) via DI; in Development, auto-runs `Database.MigrateAsync()` + `DbSeeder.SeedAsync()` on startup (not something a real prod deployment would do — see comment in the file).
 
+### Booking Service structure
+
+```
+src/BookingService/
+  Controllers/BookingsController.cs   POST /bookings/reserve
+  Models/                             Booking, BookingTicket (owned), Ticket/TicketStatus (read-only view of Event Service's table)
+  Dtos/ReserveBookingRequest.cs        ReserveBookingRequest/ReserveBookingResponse records
+  Data/BookingDbContext.cs             DbContext; Ticket is .ExcludeFromMigrations() since Event Service owns that table's schema
+  Migrations/                          EF Core migrations, own history table __BookingServiceMigrationsHistory (kept separate from Event Service's, since both target the same physical database)
+```
+`Program.cs`: registers `BookingDbContext` (Npgsql/Postgres) and `IConnectionMultiplexer` (StackExchange.Redis, registered as a **singleton** — not scoped like `DbContext` — since the Redis connection is meant to be shared for the app's whole lifetime, not reopened per request) via DI; auto-migrates on startup in Development (no dev-seed needed — reads `Ticket` rows that Event Service already seeded in the shared database).
+
+**Known simplification**: `ReserveBookingRequest.UserId` comes directly in the request body — no auth/API Gateway exists yet to derive it from a real session.
+
 ## Running the app locally
 
-The API is not a persistent service — it's only reachable while a `dotnet run` process is alive. Every time: start Postgres first, then the service.
+The API is not a persistent service — it's only reachable while a `dotnet run` process is alive. Every time: start Postgres + Redis first, then whichever service(s) you're working on.
 
 ```bash
-# 1. Postgres (from repo root — only needed once per reboot/Docker restart, stays up after)
-docker compose up -d postgres
+# 1. Postgres + Redis (from repo root — only needed once per reboot/container restart, stays up after)
+docker compose up -d postgres redis
 
 # 2. Restore EF Core migration tooling (only needed once per clone, or after dotnet-tools.json changes)
 dotnet tool restore
 
-# 3. Run the Event Service (from src/EventService/)
-cd src/EventService
+# 3. Run a service (from its own folder, e.g. src/EventService/ or src/BookingService/)
+cd src/EventService   # or src/BookingService
 dotnet run
 ```
-Listens on `http://localhost:5049` by default (the `http` profile in `Properties/launchSettings.json`). Migrations + dev seed data apply automatically on startup in Development — no manual `dotnet ef database update` needed day to day (that command is still how the *first* migration for a new schema change gets generated: `dotnet ef migrations add <Name>`, run from the service's own folder).
+Event Service listens on `http://localhost:5049`, Booking Service on `http://localhost:5290` (both from their own `Properties/launchSettings.json` — auto-assigned per project, no collision). Migrations apply automatically on startup in Development for both — no manual `dotnet ef database update` needed day to day (that command is still how the *first* migration for a new schema change gets generated: `dotnet ef migrations add <Name>`, run from the service's own folder).
 
-Leave that terminal running while testing; `Ctrl+C` to stop. VS Code's Run/Debug panel (`F5`) does the same thing with a debugger attached.
+Leave the terminal(s) running while testing; `Ctrl+C` to stop. VS Code's Run/Debug panel (`F5`) does the same thing with a debugger attached — pick which project to launch if prompted, since there's now more than one.
 
-**Testing the running API**: `src/EventService/EventService.http` has saved requests runnable via VS Code's **REST Client** extension (click "Send Request" above a request, or place cursor in one and hit `Cmd+Alt+R`) — or plain `curl http://localhost:5049/events/<id>`.
+**Testing the running API**: each service has its own `.http` file (`src/EventService/EventService.http`, `src/BookingService/BookingService.http`) runnable via VS Code's **REST Client** extension (click "Send Request" above a request, or place cursor in one and hit `Cmd+Alt+R`) — or plain `curl`.
 
 ## Deployment
 

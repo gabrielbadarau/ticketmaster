@@ -1,0 +1,23 @@
+@BookingService_HostAddress = http://localhost:5290
+
+### Reserve a ticket — copy a real, currently-Available ticket id from
+### GET http://localhost:5049/events/search (Event Service)
+POST {{BookingService_HostAddress}}/bookings/reserve
+Content-Type: application/json
+
+{
+  "ticketIds": ["00000000-0000-0000-0000-000000000000"],
+  "userId": "11111111-1111-1111-1111-111111111111"
+}
+
+### Reserve the SAME ticket again as a different user — expect 409,
+### proves the Redis lock prevents double-booking
+POST {{BookingService_HostAddress}}/bookings/reserve
+Content-Type: application/json
+
+{
+  "ticketIds": ["00000000-0000-0000-0000-000000000000"],
+  "userId": "22222222-2222-2222-2222-222222222222"
+}
+
+###
