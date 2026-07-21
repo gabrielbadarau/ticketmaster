@@ -88,6 +88,8 @@ Local only, no cloud, to keep cost at zero. Postgres/Redis run via Docker Compos
 ## Environment status
 
 - .NET 10 SDK: working (`dotnet --version` → 10.0.302)
-- Docker: working (`docker --version` → 29.6.2, `docker compose version` → v5.3.1)
+- Container runtime: **Rancher Desktop**, not Docker Desktop (switched 2026-07-21) — `docker --version` → 29.5.3-rd, `docker compose version` → v5.1.4
 
-Both confirmed working as of 2026-07-20. Re-check if either command starts failing (e.g. after a machine restart with Docker Desktop not running).
+**Why Rancher Desktop instead of Docker Desktop**: this machine is enrolled in Mosyle MDM (corporate device management, `@clinicalink.com`). Docker Desktop kept vanishing entirely (app, daemon, and all running containers) with no action from either of us — twice in one session — most likely a Mosyle compliance policy silently removing it, plausibly tied to Docker Desktop's commercial-use licensing terms. Rancher Desktop is Apache-2.0 licensed (no such restriction) and gives a fully drop-in-compatible `docker`/`docker compose` CLI, so nothing in `docker-compose.yml` or any command in this file needed to change.
+
+Setup note if this ever needs reinstalling: `brew install --cask rancher` (no sudo needed — it's a plain `.app`, unlike the `.pkg`-based `dotnet-sdk` cask). On first launch, the setup wizard **must** select **"dockerd (moby)"** as the container engine (not "containerd") — that's what provides the compatible `docker` CLI; the other option only gives you `nerdctl`. Kubernetes can stay disabled, not needed here. Its CLI tools install to `~/.rd/bin`, added to shell rc files automatically — only picked up by *new* terminal sessions, not ones already open at install time.
