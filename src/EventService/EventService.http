@@ -1,11 +1,32 @@
 @EventService_HostAddress = http://localhost:5049
 
-GET {{EventService_HostAddress}}/events/bea66f32-44e1-4cf9-8df9-05ad5dbbbcbe
+### Get one event by id — copy a real id from a search response below,
+### since seeded ids are randomly generated fresh every time the DB is empty.
+GET {{EventService_HostAddress}}/events/0935a2b8-26c3-4f8d-a554-d5fa206d4d50
 Accept: application/json
 
-###
+### Not found — valid guid shape, but no such event
+GET {{EventService_HostAddress}}/events/00000000-0000-0000-0000-000000000001
+Accept: application/json
 
-GET {{EventService_HostAddress}}/events/00000000-0000-0000-0000-000000000000
+### Search — no filters, first page
+GET {{EventService_HostAddress}}/events/search
+Accept: application/json
+
+### Search — keyword match (case-insensitive, matches "The Eras Tour")
+GET {{EventService_HostAddress}}/events/search?keyword=eras
+Accept: application/json
+
+### Search — keyword with no matches
+GET {{EventService_HostAddress}}/events/search?keyword=nomatch
+Accept: application/json
+
+### Search — date range
+GET {{EventService_HostAddress}}/events/search?start=2026-08-01&end=2026-10-01
+Accept: application/json
+
+### Search — pagination (2 per page, second page)
+GET {{EventService_HostAddress}}/events/search?pageSize=2&page=2
 Accept: application/json
 
 ###
