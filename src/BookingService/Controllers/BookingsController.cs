@@ -50,6 +50,25 @@ public class BookingsController(BookingDbContext db, IConnectionMultiplexer redi
             return Conflict("One or more tickets are unavailable.");
         }
 
+        // Most events never call /queue/{eventId}/enable, so this check is a
+        // no-op for them. Only events with the virtual waiting queue turned on
+        // require the reserving user to have been admitted from it first.
+        foreach (var eventId in tickets.Select(t => t.EventId).Distinct())
+        {
+            var queueEnabled = await redisDb.SetContainsAsync("queue-enabled-events", eventId.ToString());
+            if (!queueEnabled)
+            {
+                continue;
+            }
+
+            var admitted = await redisDb.KeyExistsAsync($"admitted:{eventId}:{request.UserId}");
+            if (!admitted)
+            {
+                await ReleaseLocksAsync(redisDb, acquiredLockKeys);
+                return StatusCode(403, $"Join the queue for event {eventId} and wait to be admitted before booking.");
+            }
+        }
+
         var booking = new Booking
         {
             Id = Guid.NewGuid(),

@@ -1,3 +1,4 @@
+using BookingService;
 using BookingService.Data;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
@@ -21,6 +22,8 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
 
 builder.Services.AddSingleton<IStripeClient>(new StripeClient(builder.Configuration["Stripe:SecretKey"]));
 builder.Services.AddScoped<PaymentIntentService>();
+
+builder.Services.AddHostedService<QueueAdmissionService>();
 
 var app = builder.Build();
 

@@ -42,8 +42,8 @@ Booking/reservation concurrency uses a Redis key `ticket-lock:{ticketId}` → `u
 ## Build order
 
 1. **Event Service** — done: `GET /events/{id}` returns `Event+Venue+Performer+Tickets` from real Postgres data via EF Core, dev-seeded on startup. `GET /events/search` supports `keyword` (ILIKE against name/description), `start`/`end` date range, and `page`/`pageSize` pagination — projects straight to `EventSummaryResponse` in the SQL query itself rather than loading full entities first. Both use response DTOs (`Dtos/`) rather than returning entities directly — avoids leaking EF Core's circular navigation properties into the JSON.
-2. **Booking Service** — reserve + pay + confirm all done and verified end-to-end against real Stripe test-mode API calls: `POST /bookings/reserve` (Redis TTL lock prevents double-booking, sequential-acquire-with-rollback for multi-ticket requests, DB checked as a second layer after locks succeed), `POST /bookings/{id}/pay` (creates+confirms a Stripe PaymentIntent using the test card token `pm_card_visa`, since there's no frontend yet to collect real card details), and the `POST /webhooks/stripe` webhook (the actual source of truth — verifies the Stripe signature, flips `Ticket.Status`/`Booking.Status`, releases the Redis lock, idempotent via `Booking.Status` check). Not yet built: virtual waiting queue (Deep Dive 3).
-3. **Search Service** — not started. Postgres full-text → Elasticsearch, CDN/query caching
+2. **Booking Service** — done, including Deep Dive 3's virtual waiting queue: `POST /bookings/reserve` (Redis TTL lock prevents double-booking, sequential-acquire-with-rollback for multi-ticket requests, DB checked as a second layer after locks succeed, gated on queue admission for events that have one enabled), `POST /bookings/{id}/pay` (creates+confirms a Stripe PaymentIntent using the test card token `pm_card_visa`, since there's no frontend yet to collect real card details), the `POST /webhooks/stripe` webhook (the actual source of truth — verifies the Stripe signature, flips `Ticket.Status`/`Booking.Status`, releases the Redis lock, idempotent via `Booking.Status` check), and the queue itself (`POST /queue/{eventId}/enable|join`, `GET /queue/{eventId}/status`, a `BackgroundService` admitting the front of the queue periodically). All verified end-to-end against real Stripe test-mode API calls and real timed admission cycles, not just written.
+3. **Search Service** — deliberately not split out as its own service. `GET /events/search` lives inside Event Service instead (see below) — a known deviation from the original plan, kept simple since there's no Elasticsearch/independent-scaling need yet to justify the split. Revisit if/when Elasticsearch + CDC actually get added, since that's the point where Search's needs genuinely diverge from Event Service's.
 
 Solution layout: `Ticketmaster.slnx` (root) with each service under `src/<ServiceName>` — e.g. `src/EventService`. Note: .NET 10's `dotnet new sln` now generates the newer XML-based `.slnx` format by default instead of the classic `.sln`.
 
@@ -66,12 +66,22 @@ src/EventService/
 src/BookingService/
   Controllers/BookingsController.cs       POST /bookings/reserve, POST /bookings/{id}/pay
   Controllers/StripeWebhookController.cs  POST /webhooks/stripe — the real source of truth for confirming a booking
+  Controllers/QueueController.cs          POST /queue/{eventId}/enable, POST /queue/{eventId}/join, GET /queue/{eventId}/status
+  QueueAdmissionService.cs                BackgroundService — periodically admits the front of each active queue, independent of any request
   Models/                                 Booking, BookingTicket (owned), Ticket/TicketStatus (read-only view of Event Service's table)
-  Dtos/                                   ReserveBookingRequest/Response, PayBookingResponse
+  Dtos/                                   ReserveBookingRequest/Response, PayBookingResponse, JoinQueueRequest/Response, QueueStatusResponse
   Data/BookingDbContext.cs                DbContext; Ticket is .ExcludeFromMigrations() since Event Service owns that table's schema
   Migrations/                             EF Core migrations, own history table __BookingServiceMigrationsHistory (kept separate from Event Service's, since both target the same physical database)
 ```
-`Program.cs`: registers `BookingDbContext` (Npgsql/Postgres), `IConnectionMultiplexer` (StackExchange.Redis, **singleton** — not scoped like `DbContext` — since the Redis connection is meant to be shared for the app's whole lifetime, not reopened per request), and `IStripeClient` (also singleton, same reasoning) via DI; auto-migrates on startup in Development (no dev-seed needed — reads `Ticket` rows that Event Service already seeded in the shared database).
+`Program.cs`: registers `BookingDbContext` (Npgsql/Postgres), `IConnectionMultiplexer` (StackExchange.Redis, **singleton** — not scoped like `DbContext` — since the Redis connection is meant to be shared for the app's whole lifetime, not reopened per request), `IStripeClient` (also singleton, same reasoning), and `QueueAdmissionService` (via `AddHostedService`, not `AddSingleton` — that's what actually makes the host start/stop it) via DI; auto-migrates on startup in Development (no dev-seed needed — reads `Ticket` rows that Event Service already seeded in the shared database).
+
+**Virtual waiting queue** (Deep Dive 3), Redis-only, no new Postgres tables:
+- `queue:{eventId}` — sorted set, member = userId, score = join timestamp (earliest = lowest score = front of line)
+- `active-queues` — plain set of eventIds with a non-empty queue, so the background admission loop never has to scan Postgres/Redis for "which events have people waiting"
+- `queue-enabled-events` — plain set of eventIds with the queue actually turned on via `POST /queue/{eventId}/enable`; most events never call this and `Reserve` skips the admission check entirely for them (stands in for the spec's "admin-enabled" framing — no real admin/auth system exists yet to gate this behind)
+- `admitted:{eventId}:{userId}` — string key with a 10-minute TTL (same window as the ticket lock, for consistency, otherwise unrelated), set by `QueueAdmissionService` when it pops that user off the queue. Not deleted on a successful reservation — admission is a *time window* to make attempts in, not a single-use token
+- `QueueAdmissionService.ExecuteAsync` loop (interval/batch size configurable via `Queue:AdmissionIntervalSeconds`/`Queue:AdmissionBatchSize`) uses `SortedSetPopAsync` (Redis `ZPOPMIN` with a count) to atomically admit a batch at a time
+- Deliberately **not built**: SSE/WebSocket push for queue position (Deep Dive 3's separate "Good Solution" for live seat updates) — clients would poll `GET /queue/{eventId}/status` instead. Same idea, just polling instead of a push channel.
 
 **Known simplification**: `ReserveBookingRequest.UserId` comes directly in the request body — no auth/API Gateway exists yet to derive it from a real session.
 
