@@ -4,12 +4,13 @@ using BookingService.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
+using Stripe;
 
 namespace BookingService.Controllers;
 
 [ApiController]
 [Route("[controller]")]
-public class BookingsController(BookingDbContext db, IConnectionMultiplexer redis) : ControllerBase
+public class BookingsController(BookingDbContext db, IConnectionMultiplexer redis, PaymentIntentService payments) : ControllerBase
 {
     private static readonly TimeSpan LockTtl = TimeSpan.FromMinutes(10);
 
@@ -62,6 +63,40 @@ public class BookingsController(BookingDbContext db, IConnectionMultiplexer redi
         await db.SaveChangesAsync();
 
         return new ReserveBookingResponse(booking.Id);
+    }
+
+    // Stands in for what a real frontend would do with Stripe.js/Elements:
+    // collect card details, then confirm the payment client-side. We have no
+    // frontend yet, so this creates AND confirms the PaymentIntent server-side
+    // in one call, using Stripe's dedicated always-succeeds test card token.
+    // The response here is purely informational — the webhook below is the
+    // actual source of truth that flips the booking to Confirmed.
+    [HttpPost("{id:guid}/pay")]
+    public async Task<ActionResult<PayBookingResponse>> Pay(Guid id)
+    {
+        var booking = await db.Bookings.FirstOrDefaultAsync(b => b.Id == id);
+
+        if (booking is null)
+        {
+            return NotFound();
+        }
+
+        if (booking.Status == BookingStatus.Confirmed)
+        {
+            return BadRequest("This booking is already confirmed.");
+        }
+
+        var paymentIntent = await payments.CreateAsync(new PaymentIntentCreateOptions
+        {
+            Amount = (long)(booking.TotalPrice * 100), // Stripe amounts are in cents, not dollars
+            Currency = "usd",
+            PaymentMethod = "pm_card_visa", // Stripe's built-in always-succeeds test card
+            PaymentMethodTypes = ["card"],
+            Confirm = true,
+            Metadata = new Dictionary<string, string> { ["bookingId"] = booking.Id.ToString() }
+        });
+
+        return new PayBookingResponse(paymentIntent.Id, paymentIntent.Status);
     }
 
     private static async Task ReleaseLocksAsync(IDatabase redisDb, IEnumerable<string> lockKeys)

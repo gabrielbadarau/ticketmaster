@@ -1,6 +1,7 @@
 using BookingService.Data;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
+using Stripe;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,6 +18,9 @@ builder.Services.AddDbContext<BookingDbContext>(options =>
 
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
     ConnectionMultiplexer.Connect(builder.Configuration.GetConnectionString("Redis")!));
+
+builder.Services.AddSingleton<IStripeClient>(new StripeClient(builder.Configuration["Stripe:SecretKey"]));
+builder.Services.AddScoped<PaymentIntentService>();
 
 var app = builder.Build();
 

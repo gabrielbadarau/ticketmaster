@@ -37,12 +37,12 @@ As implemented in `src/EventService/Models/` (EF Core entity classes, migrated i
 
 `Booking`/`BookingTicket` entities live in `src/BookingService/Models/` instead — see Booking Service structure below. Booking Service also keeps its own minimal `Ticket`/`TicketStatus` (duplicated from Event Service's, not shared — separate deployable services, deliberately no compile-time coupling between them).
 
-Booking/reservation concurrency uses a Redis key `ticket-lock:{ticketId}` → `userId`, with a 10-minute TTL (`SET key value NX EX 600`) — this is the actual mechanism for Deep Dive 1 (preventing double-booking), not a DB-level lock or cron cleanup job. `Ticket.Status` in Postgres only flips to `Booked` at confirm/payment time (not yet built) — the reserve step never touches it, reservation state lives entirely in Redis.
+Booking/reservation concurrency uses a Redis key `ticket-lock:{ticketId}` → `userId`, with a 10-minute TTL (`SET key value NX EX 600`) — this is the actual mechanism for Deep Dive 1 (preventing double-booking), not a DB-level lock or cron cleanup job. `Ticket.Status` in Postgres flips to `Booked` (and `UserId` gets set) only once Stripe confirms payment via webhook — the reserve step never touches either column, reservation state lives entirely in Redis until then.
 
 ## Build order
 
 1. **Event Service** — done: `GET /events/{id}` returns `Event+Venue+Performer+Tickets` from real Postgres data via EF Core, dev-seeded on startup. `GET /events/search` supports `keyword` (ILIKE against name/description), `start`/`end` date range, and `page`/`pageSize` pagination — projects straight to `EventSummaryResponse` in the SQL query itself rather than loading full entities first. Both use response DTOs (`Dtos/`) rather than returning entities directly — avoids leaking EF Core's circular navigation properties into the JSON.
-2. **Booking Service** — in progress: `POST /bookings/reserve` implemented and verified (Redis TTL lock prevents double-booking, sequential-acquire-with-rollback for multi-ticket requests, DB checked as a second layer after locks succeed). Not yet built: confirm/payment step, Stripe integration, virtual waiting queue.
+2. **Booking Service** — reserve + pay + confirm all done and verified end-to-end against real Stripe test-mode API calls: `POST /bookings/reserve` (Redis TTL lock prevents double-booking, sequential-acquire-with-rollback for multi-ticket requests, DB checked as a second layer after locks succeed), `POST /bookings/{id}/pay` (creates+confirms a Stripe PaymentIntent using the test card token `pm_card_visa`, since there's no frontend yet to collect real card details), and the `POST /webhooks/stripe` webhook (the actual source of truth — verifies the Stripe signature, flips `Ticket.Status`/`Booking.Status`, releases the Redis lock, idempotent via `Booking.Status` check). Not yet built: virtual waiting queue (Deep Dive 3).
 3. **Search Service** — not started. Postgres full-text → Elasticsearch, CDN/query caching
 
 Solution layout: `Ticketmaster.slnx` (root) with each service under `src/<ServiceName>` — e.g. `src/EventService`. Note: .NET 10's `dotnet new sln` now generates the newer XML-based `.slnx` format by default instead of the classic `.sln`.
@@ -64,15 +64,23 @@ src/EventService/
 
 ```
 src/BookingService/
-  Controllers/BookingsController.cs   POST /bookings/reserve
-  Models/                             Booking, BookingTicket (owned), Ticket/TicketStatus (read-only view of Event Service's table)
-  Dtos/ReserveBookingRequest.cs        ReserveBookingRequest/ReserveBookingResponse records
-  Data/BookingDbContext.cs             DbContext; Ticket is .ExcludeFromMigrations() since Event Service owns that table's schema
-  Migrations/                          EF Core migrations, own history table __BookingServiceMigrationsHistory (kept separate from Event Service's, since both target the same physical database)
+  Controllers/BookingsController.cs       POST /bookings/reserve, POST /bookings/{id}/pay
+  Controllers/StripeWebhookController.cs  POST /webhooks/stripe — the real source of truth for confirming a booking
+  Models/                                 Booking, BookingTicket (owned), Ticket/TicketStatus (read-only view of Event Service's table)
+  Dtos/                                   ReserveBookingRequest/Response, PayBookingResponse
+  Data/BookingDbContext.cs                DbContext; Ticket is .ExcludeFromMigrations() since Event Service owns that table's schema
+  Migrations/                             EF Core migrations, own history table __BookingServiceMigrationsHistory (kept separate from Event Service's, since both target the same physical database)
 ```
-`Program.cs`: registers `BookingDbContext` (Npgsql/Postgres) and `IConnectionMultiplexer` (StackExchange.Redis, registered as a **singleton** — not scoped like `DbContext` — since the Redis connection is meant to be shared for the app's whole lifetime, not reopened per request) via DI; auto-migrates on startup in Development (no dev-seed needed — reads `Ticket` rows that Event Service already seeded in the shared database).
+`Program.cs`: registers `BookingDbContext` (Npgsql/Postgres), `IConnectionMultiplexer` (StackExchange.Redis, **singleton** — not scoped like `DbContext` — since the Redis connection is meant to be shared for the app's whole lifetime, not reopened per request), and `IStripeClient` (also singleton, same reasoning) via DI; auto-migrates on startup in Development (no dev-seed needed — reads `Ticket` rows that Event Service already seeded in the shared database).
 
 **Known simplification**: `ReserveBookingRequest.UserId` comes directly in the request body — no auth/API Gateway exists yet to derive it from a real session.
+
+**Stripe setup** (test mode):
+- Secret key + webhook signing secret are stored via **.NET User Secrets** (`dotnet user-secrets set "Stripe:SecretKey" "sk_test_..."` / `"Stripe:WebhookSecret" "whsec_..."`, run from `src/BookingService/`) — never in `appsettings.*.json`, never committed. Requires `dotnet user-secrets init` once per project (already done — adds a `UserSecretsId` GUID to `BookingService.csproj`, which is just a pointer, not sensitive itself).
+- Local webhook delivery needs the **Stripe CLI** forwarding events to the running service, since Stripe's servers can't reach `localhost` directly: `stripe listen --forward-to localhost:5290/webhooks/stripe` (run from anywhere, needs `stripe login` once). It prints a webhook signing secret on each run — usually stable across restarts, but if webhook signature verification starts failing, re-check it matches the stored `Stripe:WebhookSecret`.
+- **Gotcha hit and fixed**: `PaymentIntentService` has both a parameterless constructor and one taking `IStripeClient`. Registering the Stripe client as `AddSingleton(new StripeClient(...))` (concrete type) silently left DI unable to satisfy the `IStripeClient` constructor, so it fell back to the parameterless one — resulting in a client with no API key, only failing at actual request time with a confusing "No API key provided" error. Fix: register as `AddSingleton<IStripeClient>(...)`, matching the interface the DI-resolved constructor actually asks for.
+- **Gotcha hit and fixed**: webhook signature verification failed with what looked like an invalid-signature error, but the real cause (only visible in `StripeException.Message`) was an **API version mismatch** — this Stripe account's default API version differs from what the installed `Stripe.net` package expects. Fixed by passing `throwOnApiVersionMismatch: false` to `EventUtility.ConstructEvent` — safe here since the webhook only reads a few basic, stable `PaymentIntent` fields (`Metadata`, `Id`, `Status`), not something likely to have changed shape between versions.
+- Testing without a frontend: `POST /bookings/{id}/pay` creates *and* confirms the PaymentIntent server-side using Stripe's dedicated always-succeeds test token `pm_card_visa` — this is what a real frontend's Stripe.js/Elements flow would otherwise do client-side.
 
 ## Running the app locally
 
@@ -95,6 +103,8 @@ Leave the terminal(s) running while testing; `Ctrl+C` to stop. VS Code's Run/Deb
 
 **Testing the running API**: each service has its own `.http` file (`src/EventService/EventService.http`, `src/BookingService/BookingService.http`) runnable via VS Code's **REST Client** extension (click "Send Request" above a request, or place cursor in one and hit `Cmd+Alt+R`) — or plain `curl`.
 
+**Testing Booking Service's payment flow specifically** additionally needs `stripe listen --forward-to localhost:5290/webhooks/stripe` running in its own terminal (forwards Stripe's webhook events to local — Stripe's servers can't reach `localhost` directly). Without it, `POST /bookings/{id}/pay` still succeeds (Stripe itself processes the payment), but the booking never actually gets confirmed in our own database, since that only happens via the webhook.
+
 ## Deployment
 
 Local only, no cloud, to keep cost at zero. Postgres/Redis run via Docker Compose once Docker is available locally (fallback: Homebrew services if Docker setup is deferred). Revisit cloud deployment only if explicitly asked.
@@ -104,4 +114,6 @@ Local only, no cloud, to keep cost at zero. Postgres/Redis run via Docker Compos
 - .NET 10 SDK: working (`dotnet --version` → 10.0.302)
 - Container runtime: **Rancher Desktop** (not Docker Desktop) — `docker --version` → 29.5.3-rd, `docker compose version` → v5.1.4. Fully drop-in compatible with `docker`/`docker compose`; nothing in `docker-compose.yml` or any command in this file needed to change.
 
-Setup note if this ever needs reinstalling: `brew install --cask rancher` (no sudo needed — it's a plain `.app`). On first launch, the setup wizard **must** select **"dockerd (moby)"** as the container engine (not "containerd") — that's what provides the compatible `docker` CLI; the other option only gives you `nerdctl`. Kubernetes stays disabled, not needed here. Its CLI tools install to `~/.rd/bin`, added to shell rc files automatically — only picked up by *new* terminal sessions, not ones already open at install time.
+Setup note if this ever needs reinstalling: `brew install --cask rancher` (no sudo needed — it's a plain `.app`). On first launch, the setup wizard **must** select **"dockerd (moby)"** as the container engine (not "containerd") — that's what provides the compatible `docker` CLI; the other option only gives you `nerdctl`. Kubernetes stays disabled, not needed here. Its CLI tools install to `~/.rd/bin`, added to shell rc files automatically — only picked up by *new* terminal sessions, not ones already open at install time. `docker compose` (the plugin form) needs a fresh terminal to resolve too; `docker-compose` (hyphenated, older standalone binary) works immediately in any shell as a fallback.
+
+**Known quirk**: Rancher Desktop's backend VM can end up stopped (`rdctl api /v1/backend_state` shows `"vmState":"DISABLED"`) while the app window/process is still open — `docker`/`docker compose` then fail with a "daemon not running" style error even though the app looks fine. Fix: `rdctl shutdown` (fully quits it) then relaunch the app fresh; `rdctl start` alone won't restart an already-stopped backend unless you actually change a setting.
