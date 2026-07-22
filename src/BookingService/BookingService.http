@@ -61,7 +61,7 @@ GET {{BookingService_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/st
 
 ### Reserve a ticket for that event BEFORE being admitted — expect 403.
 ### Wait for the admission cycle (Queue:AdmissionIntervalSeconds in
-### appsettings.Development.json, 10s by default) then re-check status
+### appsettings.Development.json, 2 minutes by default) then re-check status
 ### above and retry this — should now succeed.
 POST {{BookingService_HostAddress}}/bookings/reserve
 Content-Type: application/json
