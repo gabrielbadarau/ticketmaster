@@ -57,18 +57,15 @@ public class AuthController(AuthDbContext db, IPasswordHasher<User> passwordHash
     {
         var user = await db.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
 
-        // Deliberately the same error for "no such user" and "wrong password"
-        // -- distinguishing them would let a caller enumerate which emails
-        // are registered.
         if (user is null)
         {
-            return Unauthorized("Invalid email or password.");
+            return Unauthorized("No account found with this email.");
         }
 
         var result = passwordHasher.VerifyHashedPassword(user, user.PasswordHash, request.Password);
         if (result == PasswordVerificationResult.Failed)
         {
-            return Unauthorized("Invalid email or password.");
+            return Unauthorized("Incorrect password.");
         }
 
         var expiresAt = DateTime.UtcNow.Add(TokenLifetime);
