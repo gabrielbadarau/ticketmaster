@@ -1,4 +1,4 @@
-using System.Text;
+using System.Security.Cryptography;
 using BookingService;
 using BookingService.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -22,11 +22,14 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         // claim URI (leftover from WS-Federation-era claims systems), so
         // FindFirstValue(JwtRegisteredClaimNames.Sub) would find nothing.
         options.MapInboundClaims = false;
+
+        var rsa = RSA.Create();
+        rsa.ImportFromPem(builder.Configuration["Auth:JwtPublicKey"]);
+
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuerSigningKey = true,
-            IssuerSigningKey = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(builder.Configuration["Auth:JwtSigningKey"]!)),
+            IssuerSigningKey = new RsaSecurityKey(rsa),
             ValidateIssuer = false,
             ValidateAudience = false
         };

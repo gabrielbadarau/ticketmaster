@@ -1,6 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
-using System.Text;
 using AuthService.Data;
 using AuthService.Dtos;
 using AuthService.Models;
@@ -13,7 +12,7 @@ namespace AuthService.Controllers;
 
 [ApiController]
 [Route("auth")]
-public class AuthController(AuthDbContext db, IPasswordHasher<User> passwordHasher, IConfiguration config)
+public class AuthController(AuthDbContext db, IPasswordHasher<User> passwordHasher, SigningCredentials signingCredentials)
     : ControllerBase
 {
     private static readonly TimeSpan TokenLifetime = TimeSpan.FromHours(1);
@@ -70,9 +69,6 @@ public class AuthController(AuthDbContext db, IPasswordHasher<User> passwordHash
 
         var expiresAt = DateTime.UtcNow.Add(TokenLifetime);
 
-        var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(config["Auth:JwtSigningKey"]!));
-        var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
-
         var token = new JwtSecurityToken(
             claims:
             [
@@ -80,7 +76,7 @@ public class AuthController(AuthDbContext db, IPasswordHasher<User> passwordHash
                 new Claim(JwtRegisteredClaimNames.Email, user.Email)
             ],
             expires: expiresAt,
-            signingCredentials: credentials);
+            signingCredentials: signingCredentials);
 
         var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
 
