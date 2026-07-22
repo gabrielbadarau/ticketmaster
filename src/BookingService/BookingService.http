@@ -1,5 +1,9 @@
 @BookingService_HostAddress = http://localhost:5290
 
+### ============================================================
+### Reserve
+### ============================================================
+
 ### Reserve a ticket — copy a real, currently-Available ticket id from
 ### GET http://localhost:5049/events/search (Event Service)
 POST {{BookingService_HostAddress}}/bookings/reserve
@@ -18,6 +22,53 @@ Content-Type: application/json
 {
   "ticketIds": ["00000000-0000-0000-0000-000000000000"],
   "userId": "22222222-2222-2222-2222-222222222222"
+}
+
+### ============================================================
+### Pay + confirm
+### Needs `stripe listen --forward-to localhost:5290/webhooks/stripe`
+### running in its own terminal, or the booking never actually
+### confirms in our own database (Stripe itself still succeeds either way).
+### ============================================================
+
+### Pay for a booking — copy a real bookingId from a successful reserve
+### response above. Creates + confirms a Stripe PaymentIntent using the
+### test card token pm_card_visa.
+POST {{BookingService_HostAddress}}/bookings/00000000-0000-0000-0000-000000000000/pay
+
+### Pay again on the same (now-confirmed) booking — expect 400,
+### "This booking is already confirmed."
+POST {{BookingService_HostAddress}}/bookings/00000000-0000-0000-0000-000000000000/pay
+
+### ============================================================
+### Virtual waiting queue
+### ============================================================
+
+### Turn on queue protection for an event — copy a real eventId from
+### GET http://localhost:5049/events/search (Event Service)
+POST {{BookingService_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/enable
+
+### Join the queue for that event
+POST {{BookingService_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/join
+Content-Type: application/json
+
+{
+  "userId": "33333333-3333-3333-3333-333333333333"
+}
+
+### Check queue status/position for that user
+GET {{BookingService_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/status?userId=33333333-3333-3333-3333-333333333333
+
+### Reserve a ticket for that event BEFORE being admitted — expect 403.
+### Wait for the admission cycle (Queue:AdmissionIntervalSeconds in
+### appsettings.Development.json, 10s by default) then re-check status
+### above and retry this — should now succeed.
+POST {{BookingService_HostAddress}}/bookings/reserve
+Content-Type: application/json
+
+{
+  "ticketIds": ["00000000-0000-0000-0000-000000000000"],
+  "userId": "33333333-3333-3333-3333-333333333333"
 }
 
 ###
