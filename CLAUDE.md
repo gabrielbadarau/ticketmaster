@@ -19,7 +19,7 @@ Reference spec: [HelloInterview Ticketmaster breakdown](https://www.hellointervi
 
 Microservices (chosen deliberately for system-design learning value, even though it's more upfront plumbing than a monolith):
 
-- **API Gateway** — routing, auth, rate limiting
+- **API Gateway** — routing only for now (auth/rate limiting deliberately deferred — see Build order)
 - **Event Service** — event/venue/performer read model
 - **Booking Service** — ticket reservation + purchase flow, Redis distributed locks, Stripe integration
 - **Search Service** — event search (Postgres full-text first, Elasticsearch later)
@@ -44,6 +44,7 @@ Booking/reservation concurrency uses a Redis key `ticket-lock:{ticketId}` → `u
 1. **Event Service** — done: `GET /events/{id}` returns `Event+Venue+Performer+Tickets` from real Postgres data via EF Core, dev-seeded on startup. `GET /events/search` supports `keyword` (ILIKE against name/description), `start`/`end` date range, and `page`/`pageSize` pagination — projects straight to `EventSummaryResponse` in the SQL query itself rather than loading full entities first. Both use response DTOs (`Dtos/`) rather than returning entities directly — avoids leaking EF Core's circular navigation properties into the JSON.
 2. **Booking Service** — done, including Deep Dive 3's virtual waiting queue: `POST /bookings/reserve` (Redis TTL lock prevents double-booking, sequential-acquire-with-rollback for multi-ticket requests, DB checked as a second layer after locks succeed, gated on queue admission for events that have one enabled), `POST /bookings/{id}/pay` (creates+confirms a Stripe PaymentIntent using the test card token `pm_card_visa`, since there's no frontend yet to collect real card details), the `POST /webhooks/stripe` webhook (the actual source of truth — verifies the Stripe signature, flips `Ticket.Status`/`Booking.Status`, releases the Redis lock, idempotent via `Booking.Status` check), and the queue itself (`POST /queue/{eventId}/enable|join`, `GET /queue/{eventId}/status`, a `BackgroundService` admitting the front of the queue periodically). All verified end-to-end against real Stripe test-mode API calls and real timed admission cycles, not just written.
 3. **Search Service** — deliberately not split out as its own service. `GET /events/search` lives inside Event Service instead (see below) — a known deviation from the original plan, kept simple since there's no Elasticsearch/independent-scaling need yet to justify the split. Revisit if/when Elasticsearch + CDC actually get added, since that's the point where Search's needs genuinely diverge from Event Service's.
+4. **API Gateway** — routing done via YARP, verified end-to-end (all four route groups proxy correctly to the right service). Auth and rate limiting deliberately deferred as separate, larger pieces of work — not built yet.
 
 Solution layout: `Ticketmaster.slnx` (root) with each service under `src/<ServiceName>` — e.g. `src/EventService`. Note: .NET 10's `dotnet new sln` now generates the newer XML-based `.slnx` format by default instead of the classic `.sln`.
 
@@ -92,6 +93,17 @@ src/BookingService/
 - **Gotcha hit and fixed**: webhook signature verification failed with what looked like an invalid-signature error, but the real cause (only visible in `StripeException.Message`) was an **API version mismatch** — this Stripe account's default API version differs from what the installed `Stripe.net` package expects. Fixed by passing `throwOnApiVersionMismatch: false` to `EventUtility.ConstructEvent` — safe here since the webhook only reads a few basic, stable `PaymentIntent` fields (`Metadata`, `Id`, `Status`), not something likely to have changed shape between versions.
 - Testing without a frontend: `POST /bookings/{id}/pay` creates *and* confirms the PaymentIntent server-side using Stripe's dedicated always-succeeds test token `pm_card_visa` — this is what a real frontend's Stripe.js/Elements flow would otherwise do client-side.
 
+### API Gateway structure
+
+```
+src/ApiGateway/
+  Program.cs          AddReverseProxy().LoadFromConfig(...) + MapReverseProxy() — no controllers, no EF Core, nothing of its own
+  appsettings.json     ReverseProxy:Routes / ReverseProxy:Clusters — the actual routing table
+```
+Built on **YARP** (`Yarp.ReverseProxy`, Microsoft's own open-source .NET reverse proxy), not AWS API Gateway or any cloud service — stays consistent with this project's local-only/zero-cost constraint. Scaffolded from the `web` (Empty) template rather than `webapi`, since a pure reverse proxy has no business logic of its own — notably no `Microsoft.OpenApi` dependency at all, so no version-pinning gotcha to deal with this time.
+
+Route table: `/events/**` → Event Service (`localhost:5049`), `/bookings/**` + `/queue/**` + `/webhooks/**` → Booking Service (`localhost:5290`), all via one shared cluster per backend service. Listens on `http://localhost:5269`. `{**catch-all}` in each route's `Match.Path` is YARP's catch-all route parameter — swallows everything after the prefix, so e.g. both `/events/search?keyword=x` and `/events/<guid>` match the same route.
+
 ## Running the app locally
 
 The API is not a persistent service — it's only reachable while a `dotnet run` process is alive. Every time: start Postgres + Redis first, then whichever service(s) you're working on.
@@ -103,15 +115,15 @@ docker compose up -d postgres redis
 # 2. Restore EF Core migration tooling (only needed once per clone, or after dotnet-tools.json changes)
 dotnet tool restore
 
-# 3. Run a service (from its own folder, e.g. src/EventService/ or src/BookingService/)
-cd src/EventService   # or src/BookingService
+# 3. Run a service (from its own folder, e.g. src/EventService/, src/BookingService/, or src/ApiGateway/)
+cd src/EventService   # or src/BookingService, or src/ApiGateway
 dotnet run
 ```
-Event Service listens on `http://localhost:5049`, Booking Service on `http://localhost:5290` (both from their own `Properties/launchSettings.json` — auto-assigned per project, no collision). Migrations apply automatically on startup in Development for both — no manual `dotnet ef database update` needed day to day (that command is still how the *first* migration for a new schema change gets generated: `dotnet ef migrations add <Name>`, run from the service's own folder).
+Event Service listens on `http://localhost:5049`, Booking Service on `http://localhost:5290`, API Gateway on `http://localhost:5269` (all from their own `Properties/launchSettings.json` — auto-assigned per project, no collision). Migrations apply automatically on startup in Development for both Event and Booking Service — no manual `dotnet ef database update` needed day to day (that command is still how the *first* migration for a new schema change gets generated: `dotnet ef migrations add <Name>`, run from the service's own folder). The Gateway needs Event Service and Booking Service already running to actually proxy anywhere — it has no database/migrations of its own.
 
 Leave the terminal(s) running while testing; `Ctrl+C` to stop. VS Code's Run/Debug panel (`F5`) does the same thing with a debugger attached — pick which project to launch if prompted, since there's now more than one.
 
-**Testing the running API**: each service has its own `.http` file (`src/EventService/EventService.http`, `src/BookingService/BookingService.http`) runnable via VS Code's **REST Client** extension (click "Send Request" above a request, or place cursor in one and hit `Cmd+Alt+R`) — or plain `curl`.
+**Testing the running API**: each service has its own `.http` file (`src/EventService/EventService.http`, `src/BookingService/BookingService.http`, `src/ApiGateway/ApiGateway.http`) runnable via VS Code's **REST Client** extension (click "Send Request" above a request, or place cursor in one and hit `Cmd+Alt+R`) — or plain `curl`. Once the Gateway's running, prefer hitting *it* (`5269`) over the individual services directly, to actually exercise the routing.
 
 **Testing Booking Service's payment flow specifically** additionally needs `stripe listen --forward-to localhost:5290/webhooks/stripe` running in its own terminal (forwards Stripe's webhook events to local — Stripe's servers can't reach `localhost` directly). Without it, `POST /bookings/{id}/pay` still succeeds (Stripe itself processes the payment), but the booking never actually gets confirmed in our own database, since that only happens via the webhook.
 
