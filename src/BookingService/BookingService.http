@@ -1,27 +1,42 @@
 @BookingService_HostAddress = http://localhost:5290
 
+### Everything below requires a real token — register + login via
+### AuthService.http first, then paste the resulting token here.
+### Use a second, different user's token as @token2 for the
+### double-booking/ownership tests below.
+@token = PASTE_TOKEN_HERE
+@token2 = PASTE_A_DIFFERENT_USERS_TOKEN_HERE
+
 ### ============================================================
 ### Reserve
 ### ============================================================
+
+### No token at all — expect 401
+POST {{BookingService_HostAddress}}/bookings/reserve
+Content-Type: application/json
+
+{
+  "ticketIds": ["00000000-0000-0000-0000-000000000000"]
+}
 
 ### Reserve a ticket — copy a real, currently-Available ticket id from
 ### GET http://localhost:5049/events/search (Event Service)
 POST {{BookingService_HostAddress}}/bookings/reserve
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
-  "ticketIds": ["00000000-0000-0000-0000-000000000000"],
-  "userId": "11111111-1111-1111-1111-111111111111"
+  "ticketIds": ["00000000-0000-0000-0000-000000000000"]
 }
 
-### Reserve the SAME ticket again as a different user — expect 409,
+### Reserve the SAME ticket again as a DIFFERENT user (token2) — expect 409,
 ### proves the Redis lock prevents double-booking
 POST {{BookingService_HostAddress}}/bookings/reserve
 Content-Type: application/json
+Authorization: Bearer {{token2}}
 
 {
-  "ticketIds": ["00000000-0000-0000-0000-000000000000"],
-  "userId": "22222222-2222-2222-2222-222222222222"
+  "ticketIds": ["00000000-0000-0000-0000-000000000000"]
 }
 
 ### ============================================================
@@ -32,13 +47,19 @@ Content-Type: application/json
 ### ============================================================
 
 ### Pay for a booking — copy a real bookingId from a successful reserve
-### response above. Creates + confirms a Stripe PaymentIntent using the
-### test card token pm_card_visa.
+### response above. Must be the SAME user (token) who reserved it.
 POST {{BookingService_HostAddress}}/bookings/00000000-0000-0000-0000-000000000000/pay
+Authorization: Bearer {{token}}
+
+### A DIFFERENT user (token2) tries to pay for someone else's booking —
+### expect 403
+POST {{BookingService_HostAddress}}/bookings/00000000-0000-0000-0000-000000000000/pay
+Authorization: Bearer {{token2}}
 
 ### Pay again on the same (now-confirmed) booking — expect 400,
 ### "This booking is already confirmed."
 POST {{BookingService_HostAddress}}/bookings/00000000-0000-0000-0000-000000000000/pay
+Authorization: Bearer {{token}}
 
 ### ============================================================
 ### Virtual waiting queue
@@ -47,17 +68,15 @@ POST {{BookingService_HostAddress}}/bookings/00000000-0000-0000-0000-00000000000
 ### Turn on queue protection for an event — copy a real eventId from
 ### GET http://localhost:5049/events/search (Event Service)
 POST {{BookingService_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/enable
+Authorization: Bearer {{token}}
 
 ### Join the queue for that event
 POST {{BookingService_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/join
-Content-Type: application/json
+Authorization: Bearer {{token}}
 
-{
-  "userId": "33333333-3333-3333-3333-333333333333"
-}
-
-### Check queue status/position for that user
-GET {{BookingService_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/status?userId=33333333-3333-3333-3333-333333333333
+### Check your own queue status/position
+GET {{BookingService_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/status
+Authorization: Bearer {{token}}
 
 ### Reserve a ticket for that event BEFORE being admitted — expect 403.
 ### Wait for the admission cycle (Queue:AdmissionIntervalSeconds in
@@ -65,10 +84,10 @@ GET {{BookingService_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/st
 ### above and retry this — should now succeed.
 POST {{BookingService_HostAddress}}/bookings/reserve
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
-  "ticketIds": ["00000000-0000-0000-0000-000000000000"],
-  "userId": "33333333-3333-3333-3333-333333333333"
+  "ticketIds": ["00000000-0000-0000-0000-000000000000"]
 }
 
 ###

@@ -1,4 +1,23 @@
 @ApiGateway_HostAddress = http://localhost:5269
+@token = PASTE_TOKEN_HERE
+
+### Routed to Auth Service (localhost:5003)
+POST {{ApiGateway_HostAddress}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "dave@example.com",
+  "password": "SuperSecret123!"
+}
+
+### Also routed to Auth Service
+POST {{ApiGateway_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "dave@example.com",
+  "password": "SuperSecret123!"
+}
 
 ### Routed to Event Service (localhost:5049)
 GET {{ApiGateway_HostAddress}}/events/search?keyword=eras
@@ -9,16 +28,17 @@ GET {{ApiGateway_HostAddress}}/events/00000000-0000-0000-0000-000000000000
 Accept: application/json
 
 ### Routed to Booking Service (localhost:5290) — copy a real, Available
-### ticket id from the search above
+### ticket id from the search above, and a real token from login above
 POST {{ApiGateway_HostAddress}}/bookings/reserve
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
-  "ticketIds": ["00000000-0000-0000-0000-000000000000"],
-  "userId": "11111111-1111-1111-1111-111111111111"
+  "ticketIds": ["00000000-0000-0000-0000-000000000000"]
 }
 
 ### Also routed to Booking Service
-GET {{ApiGateway_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/status?userId=11111111-1111-1111-1111-111111111111
+GET {{ApiGateway_HostAddress}}/queue/00000000-0000-0000-0000-000000000000/status
+Authorization: Bearer {{token}}
 
 ###

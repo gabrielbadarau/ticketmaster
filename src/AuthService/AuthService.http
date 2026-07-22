@@ -1,0 +1,40 @@
+@AuthService_HostAddress = http://localhost:5003
+
+### Register a new user
+POST {{AuthService_HostAddress}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "password": "SuperSecret123!"
+}
+
+### Register the SAME email again — expect 409
+POST {{AuthService_HostAddress}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "password": "SomethingElse!"
+}
+
+### Login — copy the resulting token into Booking Service's .http file's
+### @token variable to actually call its protected endpoints
+POST {{AuthService_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "password": "SuperSecret123!"
+}
+
+### Login with the wrong password — expect 401
+POST {{AuthService_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "password": "WrongPassword"
+}
+
+###

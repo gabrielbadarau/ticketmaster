@@ -1,6 +1,8 @@
 using BookingService.Data;
 using BookingService.Dtos;
+using BookingService.Extensions;
 using BookingService.Models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
@@ -10,6 +12,7 @@ namespace BookingService.Controllers;
 
 [ApiController]
 [Route("[controller]")]
+[Authorize]
 public class BookingsController(BookingDbContext db, IConnectionMultiplexer redis, PaymentIntentService payments) : ControllerBase
 {
     private static readonly TimeSpan LockTtl = TimeSpan.FromMinutes(10);
@@ -22,6 +25,7 @@ public class BookingsController(BookingDbContext db, IConnectionMultiplexer redi
             return BadRequest("At least one ticket id is required.");
         }
 
+        var userId = User.GetUserId();
         var redisDb = redis.GetDatabase();
         var acquiredLockKeys = new List<string>();
 
@@ -29,7 +33,7 @@ public class BookingsController(BookingDbContext db, IConnectionMultiplexer redi
         {
             var lockKey = $"ticket-lock:{ticketId}";
             var acquired = await redisDb.StringSetAsync(
-                lockKey, request.UserId.ToString(), LockTtl, When.NotExists);
+                lockKey, userId.ToString(), LockTtl, When.NotExists);
 
             if (!acquired)
             {
@@ -61,7 +65,7 @@ public class BookingsController(BookingDbContext db, IConnectionMultiplexer redi
                 continue;
             }
 
-            var admitted = await redisDb.KeyExistsAsync($"admitted:{eventId}:{request.UserId}");
+            var admitted = await redisDb.KeyExistsAsync($"admitted:{eventId}:{userId}");
             if (!admitted)
             {
                 await ReleaseLocksAsync(redisDb, acquiredLockKeys);
@@ -72,7 +76,7 @@ public class BookingsController(BookingDbContext db, IConnectionMultiplexer redi
         var booking = new Booking
         {
             Id = Guid.NewGuid(),
-            UserId = request.UserId,
+            UserId = userId,
             Status = BookingStatus.InProgress,
             TotalPrice = tickets.Sum(t => t.Price),
             BookingTickets = request.TicketIds.Select(id => new BookingTicket { TicketId = id }).ToList()
@@ -98,6 +102,15 @@ public class BookingsController(BookingDbContext db, IConnectionMultiplexer redi
         if (booking is null)
         {
             return NotFound();
+        }
+
+        // Being authenticated only proves who you are, not that you're
+        // allowed to pay for THIS booking -- without this check, anyone with
+        // a valid token could pay for any booking just by guessing/knowing
+        // its id.
+        if (booking.UserId != User.GetUserId())
+        {
+            return Forbid();
         }
 
         if (booking.Status == BookingStatus.Confirmed)

@@ -4,11 +4,10 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UserSecretsId>ff77c8c4-d2f9-46a7-b126-c8c91eb25679</UserSecretsId>
+    <UserSecretsId>c215ba7b-b12e-4d06-8925-558e2baa849c</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -16,8 +15,7 @@
     </PackageReference>
     <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
-    <PackageReference Include="StackExchange.Redis" Version="3.0.17" />
-    <PackageReference Include="Stripe.net" Version="52.1.1" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.20.0" />
   </ItemGroup>
 
 </Project>

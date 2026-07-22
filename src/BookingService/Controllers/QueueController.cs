@@ -1,5 +1,7 @@
 using BookingService.Data;
 using BookingService.Dtos;
+using BookingService.Extensions;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
@@ -8,6 +10,7 @@ namespace BookingService.Controllers;
 
 [ApiController]
 [Route("queue")]
+[Authorize]
 public class QueueController(BookingDbContext db, IConnectionMultiplexer redis) : ControllerBase
 {
     // How long an admitted user has to complete a reservation before someone
@@ -16,8 +19,8 @@ public class QueueController(BookingDbContext db, IConnectionMultiplexer redis) 
     public static readonly TimeSpan AdmissionWindow = TimeSpan.FromMinutes(10);
 
     // Stands in for the spec's "admin-enabled" virtual queue — we have no
-    // real admin/auth system yet, so this is just a plain endpoint instead of
-    // something gated behind one. Most events never call this and skip
+    // real roles/admin distinction yet, so any authenticated user can enable
+    // one, not just an actual admin. Most events never call this and skip
     // queueing entirely; only ones expected to be extremely popular would.
     [HttpPost("{eventId:guid}/enable")]
     public async Task<IActionResult> Enable(Guid eventId)
@@ -33,8 +36,9 @@ public class QueueController(BookingDbContext db, IConnectionMultiplexer redis) 
     }
 
     [HttpPost("{eventId:guid}/join")]
-    public async Task<ActionResult<JoinQueueResponse>> Join(Guid eventId, JoinQueueRequest request)
+    public async Task<ActionResult<JoinQueueResponse>> Join(Guid eventId)
     {
+        var userId = User.GetUserId();
         var redisDb = redis.GetDatabase();
         var queueKey = $"queue:{eventId}";
 
@@ -42,21 +46,22 @@ public class QueueController(BookingDbContext db, IConnectionMultiplexer redis) 
         // place in line — only the first join call actually sets your score.
         await redisDb.SortedSetAddAsync(
             queueKey,
-            request.UserId.ToString(),
+            userId.ToString(),
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             SortedSetWhen.NotExists);
 
         await redisDb.SetAddAsync("active-queues", eventId.ToString());
 
-        var rank = await redisDb.SortedSetRankAsync(queueKey, request.UserId.ToString());
+        var rank = await redisDb.SortedSetRankAsync(queueKey, userId.ToString());
         var size = await redisDb.SortedSetLengthAsync(queueKey);
 
         return new JoinQueueResponse((int)(rank ?? 0) + 1, (int)size);
     }
 
     [HttpGet("{eventId:guid}/status")]
-    public async Task<ActionResult<QueueStatusResponse>> Status(Guid eventId, [FromQuery] Guid userId)
+    public async Task<ActionResult<QueueStatusResponse>> Status(Guid eventId)
     {
+        var userId = User.GetUserId();
         var redisDb = redis.GetDatabase();
 
         if (await redisDb.KeyExistsAsync($"admitted:{eventId}:{userId}"))
