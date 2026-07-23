@@ -1,6 +1,9 @@
 services:
   postgres:
     image: postgres:17
+    # wal_level=logical is required for CDC (logical replication) -- default is
+    # 'replica', which only supports physical (whole-cluster) replication.
+    command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_USER: ticketmaster
       POSTGRES_PASSWORD: ticketmaster
@@ -15,5 +18,18 @@ services:
     ports:
       - "6379:6379"
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
 volumes:
   postgres_data:
+  es_data:

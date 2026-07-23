@@ -1,4 +1,6 @@
+using Elastic.Clients.Elasticsearch;
 using EventService.Data;
+using EventService.Search;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -11,6 +13,15 @@ builder.Services.AddOpenApi();
 
 builder.Services.AddDbContext<EventDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("EventDb")));
+
+builder.Services.AddSingleton(_ =>
+{
+    var settings = new ElasticsearchClientSettings(new Uri(builder.Configuration["Elasticsearch:Url"]!))
+        .DefaultIndex(EventSearchSyncService.IndexName);
+    return new ElasticsearchClient(settings);
+});
+
+builder.Services.AddHostedService<EventSearchSyncService>();
 
 builder.Services.AddHealthChecks();
 

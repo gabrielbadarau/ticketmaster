@@ -11,7 +11,7 @@ Reference spec: [HelloInterview Ticketmaster breakdown](https://www.hellointervi
 - **.NET 10** — backend, ASP.NET Core Web API
 - **PostgreSQL** — primary datastore
 - **Redis** — distributed locks (ticket reservations with TTL), caching, virtual waiting-queue (sorted sets)
-- **Elasticsearch** — full-text event search (later phase)
+- **Elasticsearch** — full-text event search, kept in sync with Postgres via CDC (logical replication)
 - **Stripe** — payment processing
 - **React** — frontend, built later once the API works, mainly to exercise it
 
@@ -23,7 +23,7 @@ Microservices (chosen deliberately for system-design learning value, even though
 - **Auth Service** — user registration/login, issues JWTs
 - **Event Service** — event/venue/performer read model
 - **Booking Service** — ticket reservation + purchase flow, Redis distributed locks, Stripe integration, JWT-authenticated
-- **Search Service** — event search (Postgres full-text first, Elasticsearch later)
+- **Search Service** — event search, backed by Elasticsearch (see Event Service structure below); not a separate deployable
 
 **Data ownership**: one shared PostgreSQL database/schema across all services for now (matches the reference article, keeps focus on .NET + booking concurrency logic first). Database-per-service is a deliberate future refactor, not the starting point — don't split it unprompted.
 
@@ -44,9 +44,9 @@ Booking/reservation concurrency uses a Redis key `ticket-lock:{ticketId}` → `u
 
 ## Build order
 
-1. **Event Service** — done: `GET /events/{id}` returns `Event+Venue+Performer+Tickets` from real Postgres data via EF Core, dev-seeded on startup. `GET /events/search` supports `keyword` (ILIKE against name/description), `start`/`end` date range, and `page`/`pageSize` pagination — projects straight to `EventSummaryResponse` in the SQL query itself rather than loading full entities first. Both use response DTOs (`Dtos/`) rather than returning entities directly — avoids leaking EF Core's circular navigation properties into the JSON.
+1. **Event Service** — done: `GET /events/{id}` returns `Event+Venue+Performer+Tickets` from real Postgres data via EF Core, dev-seeded on startup. `GET /events/search` supports `keyword`, `start`/`end` date range, and `page`/`pageSize` pagination — now backed by **Elasticsearch** (kept in sync via CDC, see below) instead of Postgres `ILIKE`, and `keyword` matches across name/description **and** venue/performer name (an improvement `ILIKE` never covered). Both endpoints use response DTOs (`Dtos/`) rather than returning entities directly — avoids leaking EF Core's circular navigation properties into the JSON.
 2. **Booking Service** — done, including Deep Dive 3's virtual waiting queue and real JWT auth: `POST /bookings/reserve` (Redis TTL lock prevents double-booking, sequential-acquire-with-rollback for multi-ticket requests, DB checked as a second layer after locks succeed, gated on queue admission for events that have one enabled), `POST /bookings/{id}/pay` (creates+confirms a Stripe PaymentIntent using the test card token `pm_card_visa`, since there's no frontend yet to collect real card details; also checks the caller owns the booking), the `POST /webhooks/stripe` webhook (the actual source of truth — verifies the Stripe signature, flips `Ticket.Status`/`Booking.Status`, releases the Redis lock, idempotent via `Booking.Status` check, deliberately **not** behind `[Authorize]` since Stripe calls it directly with no JWT), and the queue itself (`POST /queue/{eventId}/enable|join`, `GET /queue/{eventId}/status`, a `BackgroundService` admitting the front of the queue periodically). `UserId` no longer travels in any request body/query string anywhere — every mutating endpoint requires a valid JWT and derives the caller's identity from its `sub` claim. All verified end-to-end against real Stripe test-mode API calls, real timed admission cycles, and real issued/validated/tampered JWTs, not just written.
-3. **Search Service** — deliberately not split out as its own service. `GET /events/search` lives inside Event Service instead (see below) — a known deviation from the original plan, kept simple since there's no Elasticsearch/independent-scaling need yet to justify the split. Revisit if/when Elasticsearch + CDC actually get added, since that's the point where Search's needs genuinely diverge from Event Service's.
+3. **Search Service** — deliberately not split out as its own service, even now that Elasticsearch + CDC are in. `GET /events/search` lives inside Event Service instead (see below) — a known deviation from the original plan, kept simple since there's no independent-scaling need yet to justify a separate deployable. Revisit if Search's traffic/scaling profile ever genuinely diverges from Event Service's.
 4. **API Gateway** — routing done via YARP, verified end-to-end (all five route groups proxy correctly to the right service). Rate limiting done too — global, per-client-IP fixed-window limiter (`Microsoft.AspNetCore.RateLimiting`, built into ASP.NET Core since .NET 7, no extra package), `429` + `Retry-After` on rejection, verified end-to-end including the window actually resetting. Active health checks done too — YARP polls each backend's `/health` every 5s, verified via real logs (probing, `Healthy`/`Unhealthy` state transitions all observed firing correctly); see caveat below about single-destination clusters.
 5. **Auth Service** — done: `POST /auth/register` (hashes via `PasswordHasher<T>`, unique index on `Email` guarantees no duplicate accounts even under concurrent registration attempts), `POST /auth/login` (verifies, issues a JWT signed with **RSA (RS256)** — asymmetric, not a shared secret; see below). Event Service stays fully public/unauthenticated (matches the spec's "prioritize availability for searching & viewing events") — only Booking Service's mutating endpoints require a token.
 
@@ -67,8 +67,27 @@ src/EventService/
   Data/EventDbContext.cs            DbContext, DbSets
   Data/DbSeeder.cs                  Dev-only: seeds 5 varied events if Events table is empty
   Migrations/                       EF Core migrations (InitialCreate applied), history table __EFMigrationsHistory
+  Search/EventSearchDocument.cs     Denormalized Elasticsearch document shape (Event+Venue+Performer flattened)
+  Search/EventSearchSyncService.cs  BackgroundService: CDC from Postgres -> the "events" Elasticsearch index
 ```
-`Program.cs`: registers `EventDbContext` (Npgsql/Postgres) via DI; in Development, auto-runs `Database.MigrateAsync()` + `DbSeeder.SeedAsync()` on startup (not something a real prod deployment would do — see comment in the file).
+`Program.cs`: registers `EventDbContext` (Npgsql/Postgres) via DI; in Development, auto-runs `Database.MigrateAsync()` + `DbSeeder.SeedAsync()` on startup (not something a real prod deployment would do — see comment in the file). Also registers `ElasticsearchClient` (singleton, same reasoning as Booking Service's Redis/Stripe clients) and `EventSearchSyncService` via `AddHostedService`.
+
+**Search, via Elasticsearch + CDC**: `GET /events/search` queries Elasticsearch instead of Postgres. Getting here needed two real pieces of new infrastructure, both free/local (`docker-compose.yml`):
+- **Elasticsearch** (`docker.elastic.co/elasticsearch/elasticsearch:8.15.0`) — single-node, `xpack.security.enabled=false` (no auth/TLS, fine for local-only; never do this in a real deployment), `9200:9200`. Client pinned to the matching `Elastic.Clients.Elasticsearch` 8.15.10 (not the newer 9.x the SDK installs by default) to avoid a needless client/server version-mismatch risk, same reasoning as the Stripe API-version gotcha.
+- **Postgres logical replication** — `wal_level=logical` set via a `command:` override on the `postgres` service (default is `replica`, which only supports whole-cluster physical replication, not row-level CDC). This is what actually enables Postgres to stream row-level WAL changes out.
+
+**`EventSearchSyncService`** (a `BackgroundService`, same shape as Booking Service's `QueueAdmissionService`) does three things on startup, in order:
+1. **Ensures a Postgres publication and replication slot exist** (`event_search_publication` / `event_search_slot`) — checked via plain SQL against `pg_publication`/`pg_replication_slots` over a regular `NpgsqlConnection`, since the replication-protocol connection used for streaming can only run a handful of dedicated replication commands, not arbitrary SQL.
+2. **Backfills**: reads every existing `Event` (joined with `Venue`+`Performer` via EF Core) and indexes it into Elasticsearch. CDC only captures changes from the moment the slot is created onward — data that already existed needs this one-time catch-up pass. Runs on every startup, not just the first; a plain `IndexAsync` (index-by-id) is naturally idempotent, so re-running it against already-current documents is harmless.
+3. **Tails the replication stream forever** (`Npgsql.Replication`, `pgoutput` plugin — no extra NuGet package needed, this ships in the base `Npgsql` package already referenced transitively via `Npgsql.EntityFrameworkCore.PostgreSQL`): on insert/update, reads only the changed row's `Id` off the wire, then **re-reads the full Event+Venue+Performer join from Postgres** and upserts that denormalized document into Elasticsearch; on delete, removes the document by id. Reconstructing the join purely from WAL deltas across three separate tables would be far more complex for no real benefit at this scale — re-fetching is simpler and the source of truth (Postgres) is always one query away.
+
+**Document shape** (`EventSearchDocument`): deliberately denormalized — `VenueName`/`VenueAddress`/`VenueCapacity`/`PerformerName`/`PerformerType` flattened directly onto the event document, since Elasticsearch has no concept of a SQL join. The document id is the Event's own `Id`, so re-indexing is always a plain upsert. The index itself is never explicitly created — Elasticsearch auto-creates it with dynamic mapping on the first document indexed (during backfill), which is enough at this scale; a real deployment would want an explicit mapping (to control analyzers, avoid unnecessary keyword sub-fields, guarantee `Date` is recognized as `date` and not `text`) rather than relying on dynamic date detection.
+
+**Query shape**: `keyword` becomes a `bool` query with `should` clauses (`match`) against `name`, `description`, `venueName`, and `performerName` (`MinimumShouldMatch(1)`) — actual full-text matching via Elasticsearch's inverted index, not a substring scan. `start`/`end` become a `filter` clause (`range`/`date_range`) — filters don't contribute to relevance scoring and are cacheable, which is the correct clause type for a hard date boundary. Sorted by `date`, paginated via `from`/`size`.
+
+- **Gotcha hit and fixed**: reading a replicated row's `Id` column via `ReplicationValue.Get<Guid>(ct)` threw `System.InvalidCastException: Reading as 'System.Guid' is not supported for fields having DataTypeName 'text'` — `pgoutput` streams column values in text format by default, so Npgsql reports the field's type as `text` at this layer regardless of the column's real Postgres type (`uuid`). Fixed by reading as `string` via `Get<string>(ct)` and parsing with `Guid.Parse(...)` instead, which works regardless of wire format.
+- Verified end-to-end, not just written: publication/slot auto-created on first run and correctly reused (not re-created) on subsequent restarts; initial backfill of all seeded events confirmed via direct Elasticsearch queries; `GET /events/search` returning real Elasticsearch-backed results (including a keyword match against a venue name, which the old `ILIKE` version could never do); and a real insert, update, and delete performed directly against Postgres via `psql` — each one observed propagating into Elasticsearch within ~2 seconds with the app already running, no restart needed.
+- **Known limitation, deliberate for now**: the whole pipeline runs inside Event Service's own process as a `BackgroundService`, sharing its lifecycle — if Event Service is down, indexing stops (though search reads still work fine off the last-synced Elasticsearch state). A real deployment would likely run this as its own worker process so search indexing survives Event Service restarts/deploys independently.
 
 ### Booking Service structure
 
@@ -144,11 +163,11 @@ Login returns distinct messages for "no account with this email" vs. "incorrect 
 
 ## Running the app locally
 
-The API is not a persistent service — it's only reachable while a `dotnet run` process is alive. Every time: start Postgres + Redis first, then whichever service(s) you're working on.
+The API is not a persistent service — it's only reachable while a `dotnet run` process is alive. Every time: start Postgres + Redis + Elasticsearch first, then whichever service(s) you're working on.
 
 ```bash
-# 1. Postgres + Redis (from repo root — only needed once per reboot/container restart, stays up after)
-docker compose up -d postgres redis
+# 1. Postgres + Redis + Elasticsearch (from repo root — only needed once per reboot/container restart, stays up after)
+docker compose up -d postgres redis elasticsearch
 
 # 2. Restore EF Core migration tooling (only needed once per clone, or after dotnet-tools.json changes)
 dotnet tool restore
@@ -157,7 +176,7 @@ dotnet tool restore
 cd src/EventService   # or src/BookingService, src/ApiGateway, or src/AuthService
 dotnet run
 ```
-Event Service listens on `http://localhost:5049`, Booking Service on `http://localhost:5290`, API Gateway on `http://localhost:5269`, Auth Service on `http://localhost:5003` (all from their own `Properties/launchSettings.json` — auto-assigned per project, no collision). Migrations apply automatically on startup in Development for Event, Booking, and Auth Service — no manual `dotnet ef database update` needed day to day (that command is still how the *first* migration for a new schema change gets generated: `dotnet ef migrations add <Name>`, run from the service's own folder). The Gateway needs the other three already running to actually proxy anywhere — it has no database/migrations of its own. To use Booking Service's protected endpoints, Auth Service needs to be running too, to register/log in and get a token in the first place.
+Event Service listens on `http://localhost:5049`, Booking Service on `http://localhost:5290`, API Gateway on `http://localhost:5269`, Auth Service on `http://localhost:5003` (all from their own `Properties/launchSettings.json` — auto-assigned per project, no collision). Migrations apply automatically on startup in Development for Event, Booking, and Auth Service — no manual `dotnet ef database update` needed day to day (that command is still how the *first* migration for a new schema change gets generated: `dotnet ef migrations add <Name>`, run from the service's own folder). The Gateway needs the other three already running to actually proxy anywhere — it has no database/migrations of its own. To use Booking Service's protected endpoints, Auth Service needs to be running too, to register/log in and get a token in the first place. Event Service additionally needs Elasticsearch up (and Postgres's `wal_level=logical`, already baked into `docker-compose.yml`) for `EventSearchSyncService` to start cleanly and for `GET /events/search` to return anything.
 
 Leave the terminal(s) running while testing; `Ctrl+C` to stop. VS Code's Run/Debug panel (`F5`) does the same thing with a debugger attached — pick which project to launch if prompted, since there's now more than one.
 
